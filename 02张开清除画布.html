@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AR 空间绘图 & 魔法相框 - MediaPipe</title>
+    <script src="./camera_utils.js" crossorigin="anonymous"></script>
+    <script src="./control_utils.js" crossorigin="anonymous"></script>
+    <script src="./hands.js" crossorigin="anonymous"></script>
+
+    <style>
+      body {
+        margin: 0;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        height: 100vh;
+        background-color: #111;
+        color: white;
+        font-family: sans-serif;
+        flex-direction: column;
+      }
+      .container {
+        position: relative;
+        width: 960px;
+        height: 540px;
+        border-radius: 10px;
+        overflow: hidden;
+        box-shadow: 0 0 30px rgba(0, 0, 0, 0.8);
+      }
+      .input_video {
+        display: none;
+      }
+      .output_canvas {
+        width: 100%;
+        height: 100%;
+        display: block;
+      }
+      #controls {
+        margin-top: 20px;
+      }
+      button {
+        padding: 10px 24px;
+        font-size: 16px;
+        cursor: pointer;
+        border: none;
+        border-radius: 8px;
+        background-color: #ff1493;
+        color: white;
+        font-weight: bold;
+        transition: 0.2s;
+      }
+      button:hover {
+        background-color: #ff47a3;
+      }
+      #loading {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        font-size: 24px;
+        z-index: 30;
+        text-shadow: 0 2px 4px rgba(0, 0, 0, 0.5);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div id="loading">正在加载 AI 模型，请稍候...</div>
+      <video class="input_video" autoplay playsinline></video>
+      <canvas class="output_canvas" width="960" height="540"></canvas>
+    </div>
+
+    <div id="controls">
+      <button onclick="clearCanvas()">清空画板 (或对着镜头张开手掌 ✋)</button>
+    </div>
+
+    <script>
+      const videoElement = document.querySelector(".input_video");
+      const canvasElement = document.querySelector(".output_canvas");
+      const ctx = canvasElement.getContext("2d");
+      const loadingText = document.getElementById("loading");
+
+      let strokes = [];
+      let currentStroke = [];
+      let isPinching = false;
+      let showClearTextFrames = 0;
+
+      function getDistance(p1, p2) {
+        return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2));
+      }
+
+      function clearCanvas() {
+        strokes = [];
+        currentStroke = [];
+      }
+
+      // ==========================================
+      // 新增：判断是否张开手掌 (出“布”)
+      // ==========================================
+      function checkOpenPalm(landmarks) {
+        const wrist = landmarks[0];
+        const thumbTip = landmarks[4];
+        const indexTip = landmarks[8];
+
+        // 1. 防误触：如果食指和大拇指靠得较近（可能在捏合画画），绝对不是张开手掌
+        if (getDistance(thumbTip, indexTip) < 0.15) {
+          return false;
+        }
+
+        // 2. 检查 5 根手指是否都处于伸展状态
+        // 对比 指尖(tip) 和 中间关节(pip/mcp) 到手腕的距离
+        const fingers = [
+          { tip: 4, joint: 2 }, // 大拇指
+          { tip: 8, joint: 6 }, // 食指
+          { tip: 12, joint: 10 }, // 中指
+          { tip: 16, joint: 14 }, // 无名指
+          { tip: 20, joint: 18 }, // 小拇指
+        ];
+
+        let extendedCount = 0;
+        for (let finger of fingers) {
+          const tipDist = getDistance(landmarks[finger.tip], wrist);
+          const jointDist = getDistance(landmarks[finger.joint], wrist);
+
+          // 伸展状态下，指尖离手腕的距离，必然大于中间关节离手腕的距离
+          if (tipDist > jointDist) {
+            extendedCount++;
+          }
+        }
+
+        // 只有当 5 根手指全部伸直时，才判定为张开手掌
+        return extendedCount === 5;
+      }
+
+      function drawSmoothLine(strokeContext, points) {
+        if (points.length < 2) return;
+        strokeContext.beginPath();
+        strokeContext.moveTo(points[0].x, points[0].y);
+
+        for (let i = 1; i < points.length - 1; i++) {
+          const xc = (points[i].x + points[i + 1].x) / 2;
+          const yc = (points[i].y + points[i + 1].y) / 2;
+          strokeContext.quadraticCurveTo(points[i].x, points[i].y, xc, yc);
+        }
+        strokeContext.lineTo(
+          points[points.length - 1].x,
+          points[points.length - 1].y,
+        );
+        strokeContext.stroke();
+      }
+
+      function onResults(results) {
+        loadingText.style.display = "none";
+
+        ctx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+
+        // 1. 绘制底层灰白背景
+        ctx.save();
+        ctx.translate(canvasElement.width, 0);
+        ctx.scale(-1, 1);
+        ctx.filter = "grayscale(100%) brightness(70%)";
+        if (results.image) {
+          ctx.drawImage(
+            results.image,
+            0,
+            0,
+            canvasElement.width,
+            canvasElement.height,
+          );
+        }
+        ctx.restore();
+
+        if (
+          results.multiHandLandmarks &&
+          results.multiHandLandmarks.length > 0
+        ) {
+          // 2. 魔法相框特效
+          if (results.multiHandLandmarks.length === 2) {
+            const hand1 = results.multiHandLandmarks[0];
+            const hand2 = results.multiHandLandmarks[1];
+
+            const points = [hand1[8], hand1[4], hand2[8], hand2[4]].map(
+              (p) => ({
+                x: (1 - p.x) * canvasElement.width,
+                y: p.y * canvasElement.height,
+              }),
+            );
+
+            const minX = Math.min(...points.map((p) => p.x));
+            const maxX = Math.max(...points.map((p) => p.x));
+            const minY = Math.min(...points.map((p) => p.y));
+            const maxY = Math.max(...points.map((p) => p.y));
+
+            if (maxX - minX > 80 && maxY - minY > 80) {
+              ctx.save();
+              ctx.beginPath();
+              ctx.rect(minX, minY, maxX - minX, maxY - minY);
+              ctx.clip();
+
+              ctx.translate(canvasElement.width, 0);
+              ctx.scale(-1, 1);
+              ctx.filter = "none";
+              ctx.drawImage(
+                results.image,
+                0,
+                0,
+                canvasElement.width,
+                canvasElement.height,
+              );
+              ctx.restore();
+
+              ctx.save();
+              ctx.strokeStyle = "#00ff00";
+              ctx.lineWidth = 4;
+              ctx.shadowBlur = 15;
+              ctx.shadowColor = "#00ff00";
+              ctx.strokeRect(minX, minY, maxX - minX, maxY - minY);
+
+              ctx.fillStyle = "#00ff00";
+              points.forEach((p) => {
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, 5, 0, 2 * Math.PI);
+                ctx.fill();
+              });
+              ctx.restore();
+            }
+          }
+
+          // ==========================================
+          // 3. 张开手掌判定 与 空间绘图
+          // ==========================================
+          const drawHand = results.multiHandLandmarks[0];
+
+          // 判断：如果是“张开手掌” (布)
+          if (checkOpenPalm(drawHand)) {
+            clearCanvas();
+            isPinching = false;
+            showClearTextFrames = 20; // 显示提示文字
+          } else {
+            // 如果不是张开手掌，则检测捏合画笔
+            const indexTip = drawHand[8];
+            const thumbTip = drawHand[4];
+
+            const distance = getDistance(indexTip, thumbTip);
+
+            const x = (1 - indexTip.x) * canvasElement.width;
+            const y = indexTip.y * canvasElement.height;
+
+            if (distance < 0.08) {
+              if (!isPinching) {
+                isPinching = true;
+              }
+              currentStroke.push({ x, y });
+
+              ctx.save();
+              ctx.beginPath();
+              ctx.arc(x, y, 8, 0, 2 * Math.PI);
+              ctx.fillStyle = "#ff1493";
+              ctx.shadowBlur = 20;
+              ctx.shadowColor = "#ff1493";
+              ctx.fill();
+              ctx.restore();
+            } else {
+              if (isPinching) {
+                if (currentStroke.length > 0) strokes.push([...currentStroke]);
+                currentStroke = [];
+                isPinching = false;
+              }
+            }
+          }
+        } else {
+          if (isPinching) {
+            if (currentStroke.length > 0) strokes.push([...currentStroke]);
+            currentStroke = [];
+            isPinching = false;
+          }
+        }
+
+        // 4. 渲染所有线条
+        ctx.save();
+        ctx.lineWidth = 8;
+        ctx.strokeStyle = "#ff1493";
+        ctx.lineCap = "round";
+        ctx.lineJoin = "round";
+        ctx.shadowBlur = 15;
+        ctx.shadowColor = "#ff1493";
+
+        strokes.forEach((stroke) => drawSmoothLine(ctx, stroke));
+        if (currentStroke.length > 1) drawSmoothLine(ctx, currentStroke);
+        ctx.restore();
+
+        // 5. 显示 UI 提示
+        if (showClearTextFrames > 0) {
+          ctx.save();
+          ctx.fillStyle = "#ff1493";
+          ctx.font = "bold 32px sans-serif";
+          ctx.textAlign = "center";
+          ctx.shadowBlur = 10;
+          ctx.shadowColor = "#ff1493";
+          ctx.fillText("🧽 画布已清空", canvasElement.width / 2, 60);
+          ctx.restore();
+          showClearTextFrames--;
+        }
+      }
+
+      const hands = new Hands({
+        locateFile: (file) => {
+          return `./${file}`;
+        },
+      });
+      hands.setOptions({
+        maxNumHands: 2,
+        modelComplexity: 1,
+        minDetectionConfidence: 0.6,
+        minTrackingConfidence: 0.5,
+      });
+      hands.onResults(onResults);
+
+      const camera = new Camera(videoElement, {
+        onFrame: async () => {
+          await hands.send({ image: videoElement });
+        },
+        width: 960,
+        height: 540,
+      });
+      camera.start();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AR 空间绘图 & 魔法相框 - MediaPipe</title>
+    <script src="./camera_utils.js" crossorigin="anonymous"></script>
+    <script src="./control_utils.js" crossorigin="anonymous"></script>
+    <script src="./hands.js" crossorigin="anonymous"></script>
+
+    <style>
+      body {
+        margin: 0;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        height: 100vh;
+        background-color: #111;
+        color: white;
+        font-family: sans-serif;
+        flex-direction: column;
+      }
+      .container {
+        position: relative;
+        width: 960px;
+        height: 540px;
+        border-radius: 10px;
+        overflow: hidden;
+        box-shadow: 0 0 30px rgba(0, 0, 0, 0.8);
+      }
+      /* 隐藏原生视频标签，所有的渲染（包括灰白和彩色视频）都在 Canvas 中完成 */
+      .input_video {
+        display: none;
+      }
+      .output_canvas {
+        width: 100%;
+        height: 100%;
+        display: block;
+      }
+      #controls {
+        margin-top: 20px;
+      }
+      button {
+        padding: 10px 24px;
+        font-size: 16px;
+        cursor: pointer;
+        border: none;
+        border-radius: 8px;
+        background-color: #ff1493;
+        color: white;
+        font-weight: bold;
+        transition: 0.2s;
+      }
+      button:hover {
+        background-color: #ff47a3;
+      }
+      #loading {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        font-size: 24px;
+        z-index: 30;
+        text-shadow: 0 2px 4px rgba(0, 0, 0, 0.5);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div id="loading">正在加载 AI 模型，请稍候...</div>
+      <video class="input_video" autoplay playsinline></video>
+      <canvas class="output_canvas" width="960" height="540"></canvas>
+    </div>
+
+    <div id="controls">
+      <button onclick="clearCanvas()">清空画板</button>
+    </div>
+
+    <script>
+      const videoElement = document.querySelector(".input_video");
+      const canvasElement = document.querySelector(".output_canvas");
+      const ctx = canvasElement.getContext("2d");
+      const loadingText = document.getElementById("loading");
+
+      let strokes = [];
+      let currentStroke = [];
+      let isPinching = false;
+
+      function getDistance(p1, p2) {
+        return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2));
+      }
+
+      function clearCanvas() {
+        strokes = [];
+        currentStroke = [];
+      }
+
+      // 绘制平滑曲线的方法
+      function drawSmoothLine(strokeContext, points) {
+        if (points.length < 2) return;
+        strokeContext.beginPath();
+        strokeContext.moveTo(points[0].x, points[0].y);
+
+        // 使用贝塞尔二次曲线连接中点，实现极为平滑的线条
+        for (let i = 1; i < points.length - 1; i++) {
+          const xc = (points[i].x + points[i + 1].x) / 2;
+          const yc = (points[i].y + points[i + 1].y) / 2;
+          strokeContext.quadraticCurveTo(points[i].x, points[i].y, xc, yc);
+        }
+        // 补齐最后一个点
+        strokeContext.lineTo(
+          points[points.length - 1].x,
+          points[points.length - 1].y,
+        );
+        strokeContext.stroke();
+      }
+
+      function onResults(results) {
+        loadingText.style.display = "none";
+
+        ctx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+
+        // ==========================================
+        // 1. 绘制底层背景：水平镜像 + 黑白滤镜
+        // ==========================================
+        ctx.save();
+        ctx.translate(canvasElement.width, 0); // 水平翻转画布准备
+        ctx.scale(-1, 1);
+        ctx.filter = "grayscale(100%) brightness(70%)"; // 灰白且稍微调暗
+        if (results.image) {
+          ctx.drawImage(
+            results.image,
+            0,
+            0,
+            canvasElement.width,
+            canvasElement.height,
+          );
+        }
+        ctx.restore();
+
+        if (
+          results.multiHandLandmarks &&
+          results.multiHandLandmarks.length > 0
+        ) {
+          // ==========================================
+          // 2. 魔法相框特效：检测到两只手时触发
+          // ==========================================
+          if (results.multiHandLandmarks.length === 2) {
+            const hand1 = results.multiHandLandmarks[0];
+            const hand2 = results.multiHandLandmarks[1];
+
+            // 提取两只手的食指(8)和大拇指(4)
+            const points = [hand1[8], hand1[4], hand2[8], hand2[4]].map(
+              (p) => ({
+                x: (1 - p.x) * canvasElement.width, // 注意：由于画面翻转了，X坐标也需要反转(1 - x)
+                y: p.y * canvasElement.height,
+              }),
+            );
+
+            // 计算这4个点组成的包围盒（相框区域）
+            const minX = Math.min(...points.map((p) => p.x));
+            const maxX = Math.max(...points.map((p) => p.x));
+            const minY = Math.min(...points.map((p) => p.y));
+            const maxY = Math.max(...points.map((p) => p.y));
+
+            // 避免误触：如果相框达到一定大小才显示
+            if (maxX - minX > 80 && maxY - minY > 80) {
+              // A. 在相框内绘制彩色原画面
+              ctx.save();
+              ctx.beginPath();
+              ctx.rect(minX, minY, maxX - minX, maxY - minY);
+              ctx.clip(); // 裁剪画布，接下来的操作只在这个矩形内生效
+
+              ctx.translate(canvasElement.width, 0);
+              ctx.scale(-1, 1);
+              ctx.filter = "none"; // 恢复原色
+              ctx.drawImage(
+                results.image,
+                0,
+                0,
+                canvasElement.width,
+                canvasElement.height,
+              );
+              ctx.restore();
+
+              // B. 绘制绿色霓虹边框
+              ctx.save();
+              ctx.strokeStyle = "#00ff00";
+              ctx.lineWidth = 4;
+              ctx.shadowBlur = 15;
+              ctx.shadowColor = "#00ff00";
+              ctx.strokeRect(minX, minY, maxX - minX, maxY - minY);
+
+              // 可选：绘制四个角的准心装饰
+              ctx.fillStyle = "#00ff00";
+              points.forEach((p) => {
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, 5, 0, 2 * Math.PI);
+                ctx.fill();
+              });
+              ctx.restore();
+            }
+          }
+
+          // ==========================================
+          // 3. 空间绘图特效：捏合手指绘制粉色轨迹
+          // ==========================================
+          // 默认取第一只手来画画
+          const drawHand = results.multiHandLandmarks[0];
+          const indexTip = drawHand[8];
+          const thumbTip = drawHand[4];
+
+          const distance = getDistance(indexTip, thumbTip);
+          const x = (1 - indexTip.x) * canvasElement.width; // 镜像坐标
+          const y = indexTip.y * canvasElement.height;
+
+          // 距离放宽到 0.08，防止手抖导致线条断裂
+          if (distance < 0.08) {
+            if (!isPinching) {
+              isPinching = true;
+            }
+            currentStroke.push({ x, y });
+
+            // 笔尖发光点
+            ctx.save();
+            ctx.beginPath();
+            ctx.arc(x, y, 8, 0, 2 * Math.PI);
+            ctx.fillStyle = "#ff1493";
+            ctx.shadowBlur = 20;
+            ctx.shadowColor = "#ff1493";
+            ctx.fill();
+            ctx.restore();
+          } else {
+            if (isPinching) {
+              if (currentStroke.length > 0) strokes.push([...currentStroke]);
+              currentStroke = [];
+              isPinching = false;
+            }
+          }
+        } else {
+          // 手离开屏幕时，打断当前笔画
+          if (isPinching) {
+            if (currentStroke.length > 0) strokes.push([...currentStroke]);
+            currentStroke = [];
+            isPinching = false;
+          }
+        }
+
+        // ==========================================
+        // 4. 渲染所有绘制的历史线条（平滑处理）
+        // ==========================================
+        ctx.save();
+        ctx.lineWidth = 8;
+        ctx.strokeStyle = "#ff1493"; // 霓虹粉
+        ctx.lineCap = "round";
+        ctx.lineJoin = "round";
+        ctx.shadowBlur = 15;
+        ctx.shadowColor = "#ff1493";
+
+        // 渲染历史笔画
+        strokes.forEach((stroke) => drawSmoothLine(ctx, stroke));
+        // 渲染当前正在画的笔画
+        if (currentStroke.length > 1) drawSmoothLine(ctx, currentStroke);
+
+        ctx.restore();
+      }
+
+      const hands = new Hands({
+        locateFile: (file) => {
+          return `./${file}`;
+        },
+      });
+      hands.setOptions({
+        maxNumHands: 2, // 必须设置为 2，才能识别双手相框
+        modelComplexity: 1,
+        minDetectionConfidence: 0.6, // 稍微提高置信度，减少误识别
+        minTrackingConfidence: 0.5,
+      });
+      hands.onResults(onResults);
+
+      const camera = new Camera(videoElement, {
+        onFrame: async () => {
+          await hands.send({ image: videoElement });
+        },
+        width: 960,
+        height: 540,
+      });
+      camera.start();
+    </script>
+  </body>
+</html>
