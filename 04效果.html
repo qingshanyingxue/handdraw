@@ -1,0 +1,390 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>进阶手势控制：双层粒子特效</title>
+    <style>
+      body {
+        margin: 0;
+        overflow: hidden;
+        background-color: #050505;
+        font-family: sans-serif;
+      }
+      canvas {
+        display: block;
+      }
+      #videoElement {
+        display: none;
+      }
+      #loading {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        color: #fff;
+        font-size: 18px;
+        letter-spacing: 2px;
+      }
+      #ui-panel {
+        position: absolute;
+        top: 20px;
+        left: 20px;
+        color: rgba(255, 255, 255, 0.9);
+        background: rgba(0, 0, 0, 0.6);
+        padding: 15px;
+        border-radius: 10px;
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        backdrop-filter: blur(5px);
+      }
+      .color-picker {
+        margin-bottom: 10px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+      }
+      input[type="color"] {
+        border: none;
+        width: 30px;
+        height: 30px;
+        border-radius: 5px;
+        cursor: pointer;
+        background: none;
+      }
+      .tips {
+        margin-top: 15px;
+        line-height: 1.8;
+        font-size: 14px;
+        color: #ccc;
+      }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script
+      src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"
+      crossorigin="anonymous"
+    ></script>
+    <script
+      src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"
+      crossorigin="anonymous"
+    ></script>
+  </head>
+  <body>
+    <div id="loading">正在加载 AI 视觉模型，请允许使用摄像头...</div>
+
+    <div id="ui-panel">
+      <div class="color-picker">
+        <span>内层粒子颜色:</span>
+        <input type="color" id="innerColorPicker" value="#00ffff" />
+      </div>
+      <div class="color-picker">
+        <span>外层粒子颜色:</span>
+        <input type="color" id="outerColorPicker" value="#ff00ff" />
+      </div>
+      <div class="tips">
+        <b>🪄 魔法手势指南：</b><br />
+        ☝️ <b>单指滑动</b>：球体左右/上下旋转<br />
+        ✌️ <b>双指旋转</b>：像拧表盘一样顺/逆时针转动<br />
+        🖐️ <b>手掌缩放</b>：大拇指与小拇指张开控制大小<br />
+        ✊ <b>握拳</b>：外层爆炸，内层膨胀
+      </div>
+    </div>
+
+    <video id="videoElement" autoplay playsinline></video>
+
+    <script>
+      // ================= 1. Three.js 初始化 =================
+      const scene = new THREE.Scene();
+      const camera = new THREE.PerspectiveCamera(
+        60,
+        window.innerWidth / window.innerHeight,
+        0.1,
+        1000,
+      );
+      camera.position.z = 10;
+      const renderer = new THREE.WebGLRenderer({
+        antialias: true,
+        alpha: true,
+      });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      document.body.appendChild(renderer.domElement);
+
+      const sphereGroup = new THREE.Group();
+      scene.add(sphereGroup);
+
+      // 默认配置
+      const CONFIG = {
+        innerRadius: 2.0,
+        outerRadius: 3.5,
+        innerCount: 20000,
+        outerCount: 4000,
+        explodeMultiplier: 3,
+      };
+
+      function createParticleSphere(count, radius, colorHex) {
+        const geometry = new THREE.BufferGeometry();
+        const positions = new Float32Array(count * 3);
+        const originalPositions = new Float32Array(count * 3);
+
+        for (let i = 0; i < count * 3; i += 3) {
+          const phi = Math.acos(1 - 2 * Math.random());
+          const theta = Math.random() * 2 * Math.PI;
+          const x = radius * Math.sin(phi) * Math.cos(theta);
+          const y = radius * Math.sin(phi) * Math.sin(theta);
+          const z = radius * Math.cos(phi);
+
+          positions[i] = x;
+          positions[i + 1] = y;
+          positions[i + 2] = z;
+          originalPositions[i] = x;
+          originalPositions[i + 1] = y;
+          originalPositions[i + 2] = z;
+        }
+
+        geometry.setAttribute(
+          "position",
+          new THREE.BufferAttribute(positions, 3),
+        );
+        geometry.setAttribute(
+          "originalPosition",
+          new THREE.BufferAttribute(originalPositions, 3),
+        );
+
+        const material = new THREE.PointsMaterial({
+          size: 0.03,
+          color: colorHex,
+          transparent: true,
+          opacity: 0.8,
+          blending: THREE.AdditiveBlending,
+        });
+
+        return new THREE.Points(geometry, material);
+      }
+
+      // 创建球体
+      const innerSphere = createParticleSphere(
+        CONFIG.innerCount,
+        CONFIG.innerRadius,
+        0x00ffff,
+      );
+      const outerSphere = createParticleSphere(
+        CONFIG.outerCount,
+        CONFIG.outerRadius,
+        0xff00ff,
+      );
+      sphereGroup.add(innerSphere);
+      sphereGroup.add(outerSphere);
+
+      // ================= UI 颜色拾取器事件 =================
+      document
+        .getElementById("innerColorPicker")
+        .addEventListener("input", (e) => {
+          innerSphere.material.color.setStyle(e.target.value);
+        });
+      document
+        .getElementById("outerColorPicker")
+        .addEventListener("input", (e) => {
+          outerSphere.material.color.setStyle(e.target.value);
+        });
+
+      // ================= 2. 交互状态与动画循环 =================
+      let targetRotationX = 0;
+      let targetRotationY = 0;
+      let targetRotationZ = 0;
+      let targetGlobalScale = 1.0; // 整体缩放倍数
+      let isFist = false;
+
+      function animate() {
+        requestAnimationFrame(animate);
+
+        // 1. 平滑旋转跟随
+        sphereGroup.rotation.x +=
+          (targetRotationX - sphereGroup.rotation.x) * 0.1;
+        sphereGroup.rotation.y +=
+          (targetRotationY - sphereGroup.rotation.y) * 0.1;
+        sphereGroup.rotation.z +=
+          (targetRotationZ - sphereGroup.rotation.z) * 0.1;
+
+        // 基础自转
+        sphereGroup.rotation.y += 0.001;
+
+        // 2. 整体缩放跟随 (手掌张开控制)
+        sphereGroup.scale.lerp(
+          new THREE.Vector3(
+            targetGlobalScale,
+            targetGlobalScale,
+            targetGlobalScale,
+          ),
+          0.1,
+        );
+
+        // 3. 内层膨胀跟随 (握拳控制)
+        const innerTargetScale = isFist ? 1.5 : 1.0;
+        innerSphere.scale.lerp(
+          new THREE.Vector3(
+            innerTargetScale,
+            innerTargetScale,
+            innerTargetScale,
+          ),
+          0.1,
+        );
+
+        // 4. 处理外层爆炸效果
+        const outerPositions = outerSphere.geometry.attributes.position.array;
+        const outerOriginals =
+          outerSphere.geometry.attributes.originalPosition.array;
+
+        for (let i = 0; i < outerPositions.length; i += 3) {
+          const targetX = isFist
+            ? outerOriginals[i] * (CONFIG.explodeMultiplier + Math.random())
+            : outerOriginals[i];
+          const targetY = isFist
+            ? outerOriginals[i + 1] * (CONFIG.explodeMultiplier + Math.random())
+            : outerOriginals[i + 1];
+          const targetZ = isFist
+            ? outerOriginals[i + 2] * (CONFIG.explodeMultiplier + Math.random())
+            : outerOriginals[i + 2];
+
+          const lerpFactor = isFist ? 0.15 : 0.05;
+          outerPositions[i] += (targetX - outerPositions[i]) * lerpFactor;
+          outerPositions[i + 1] +=
+            (targetY - outerPositions[i + 1]) * lerpFactor;
+          outerPositions[i + 2] +=
+            (targetZ - outerPositions[i + 2]) * lerpFactor;
+        }
+        outerSphere.geometry.attributes.position.needsUpdate = true;
+
+        renderer.render(scene, camera);
+      }
+      animate();
+
+      // ================= 3. MediaPipe 视觉识别逻辑 =================
+      const videoElement = document.getElementById("videoElement");
+      let previousFingerX = null;
+      let previousFingerY = null;
+      let previousAngle = null;
+
+      function onResults(results) {
+        document.getElementById("loading").style.display = "none";
+
+        if (
+          results.multiHandLandmarks &&
+          results.multiHandLandmarks.length > 0
+        ) {
+          const landmarks = results.multiHandLandmarks[0];
+
+          // 识别手指是否伸直
+          const isIndexExtended = landmarks[8].y < landmarks[6].y;
+          const isMiddleExtended = landmarks[12].y < landmarks[10].y;
+          const isRingExtended = landmarks[16].y < landmarks[14].y;
+          const isPinkyExtended = landmarks[20].y < landmarks[18].y;
+
+          const extendedFingers = [
+            isIndexExtended,
+            isMiddleExtended,
+            isRingExtended,
+            isPinkyExtended,
+          ].filter(Boolean).length;
+
+          if (extendedFingers === 0) {
+            // 【状态：握拳】
+            isFist = true;
+            resetTracking();
+          } else if (extendedFingers >= 4) {
+            // 【状态：手掌张开（控制缩放）】
+            isFist = false;
+            resetTracking();
+
+            // 计算大拇指指尖(4)到小拇指指尖(20)的距离，作为手掌张开程度
+            const thumb = landmarks[4];
+            const pinky = landmarks[20];
+            const handSpan = Math.hypot(pinky.x - thumb.x, pinky.y - thumb.y);
+
+            // 映射公式：handSpan 大约在 0.2(半合) 到 0.6(全张开) 之间
+            // 将其映射为 0.5 到 2.5 的球体缩放比例
+            targetGlobalScale = Math.max(0.5, Math.min(2.5, handSpan * 3.5));
+          } else if (extendedFingers === 1 && isIndexExtended) {
+            // 【状态：单指滑动（控制XY轴旋转）】
+            isFist = false;
+            previousAngle = null; // 清除双指旋转基准
+            const currentX = landmarks[8].x;
+            const currentY = landmarks[8].y;
+
+            if (previousFingerX !== null && previousFingerY !== null) {
+              targetRotationY -= (currentX - previousFingerX) * 10;
+              targetRotationX -= (currentY - previousFingerY) * 10;
+            }
+            previousFingerX = currentX;
+            previousFingerY = currentY;
+          } else if (
+            extendedFingers === 2 &&
+            isIndexExtended &&
+            isMiddleExtended
+          ) {
+            // 【状态：双指旋转（控制Z轴顺/逆时针）】
+            isFist = false;
+            previousFingerX = null; // 清除单指滑动基准
+
+            const indexTip = landmarks[8];
+            const middleTip = landmarks[12];
+
+            // 计算食指与中指连线的角度 (atan2 结合两点差异)
+            const angle = Math.atan2(
+              middleTip.y - indexTip.y,
+              middleTip.x - indexTip.x,
+            );
+
+            if (previousAngle !== null) {
+              let deltaAngle = angle - previousAngle;
+              // 处理跨越 PI 和 -PI 临界点时的突变
+              if (deltaAngle > Math.PI) deltaAngle -= 2 * Math.PI;
+              if (deltaAngle < -Math.PI) deltaAngle += 2 * Math.PI;
+
+              targetRotationZ -= deltaAngle * 2.5; // 乘以系数放大旋转力度
+            }
+            previousAngle = angle;
+          } else {
+            resetTracking();
+          }
+        } else {
+          resetTracking();
+          targetGlobalScale += (1.0 - targetGlobalScale) * 0.05; // 没手时缓慢恢复默认大小
+        }
+      }
+
+      // 辅助：重置追踪基准点，防止手势切换时发生跳变
+      function resetTracking() {
+        previousFingerX = null;
+        previousFingerY = null;
+        previousAngle = null;
+      }
+
+      const hands = new Hands({
+        locateFile: (file) =>
+          `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`,
+      });
+      hands.setOptions({
+        maxNumHands: 1,
+        modelComplexity: 1,
+        minDetectionConfidence: 0.7,
+        minTrackingConfidence: 0.7,
+      });
+      hands.onResults(onResults);
+
+      const cameraFeed = new Camera(videoElement, {
+        onFrame: async () => {
+          await hands.send({ image: videoElement });
+        },
+        width: 640,
+        height: 480,
+      });
+      cameraFeed.start();
+
+      window.addEventListener("resize", () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+    </script>
+  </body>
+</html>

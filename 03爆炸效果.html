@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>双层粒子交互特效</title>
+    <style>
+      body {
+        margin: 0;
+        overflow: hidden;
+        background-color: #050505;
+      }
+      canvas {
+        display: block;
+      }
+      #videoElement {
+        display: none;
+      }
+      #loading {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        color: #fff;
+        font-family: sans-serif;
+        font-size: 18px;
+        letter-spacing: 2px;
+      }
+      #tip {
+        position: absolute;
+        top: 20px;
+        left: 20px;
+        color: rgba(255, 255, 255, 0.8);
+        font-family: sans-serif;
+        line-height: 1.8;
+        font-size: 14px;
+      }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script
+      src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"
+      crossorigin="anonymous"
+    ></script>
+    <script
+      src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"
+      crossorigin="anonymous"
+    ></script>
+  </head>
+  <body>
+    <div id="loading">正在加载 AI 视觉模型，请允许使用摄像头...</div>
+    <div id="tip">
+      <b>手势指南：</b><br />
+      ☝️ 单指左右平移：球体左右旋转<br />
+      ✌️ 双指左右平移：球体顺/逆时针旋转<br />
+      ✊ 握拳：外层爆炸脱离，内层膨胀<br />
+      🖐️ 手掌张开：恢复初始包裹状态
+    </div>
+    <video id="videoElement" autoplay playsinline></video>
+
+    <script>
+      // ================= 配置区域 =================
+      const CONFIG = {
+        innerColor: 0x00ffff, // 内层球体颜色 (青色)
+        outerColor: 0xff00ff, // 外层球体颜色 (紫红色)
+        innerRadius: 2.0, // 内层半径
+        outerRadius: 3.5, // 外层半径
+        innerCount: 20000, // 内层粒子数 (密集)
+        outerCount: 4000, // 外层粒子数 (稀疏)
+        explodeMultiplier: 3, // 握拳时外层爆炸扩散的倍数
+      };
+
+      // ================= 1. Three.js 初始化 =================
+      const scene = new THREE.Scene();
+      const camera = new THREE.PerspectiveCamera(
+        60,
+        window.innerWidth / window.innerHeight,
+        0.1,
+        1000,
+      );
+      camera.position.z = 10;
+      const renderer = new THREE.WebGLRenderer({
+        antialias: true,
+        alpha: true,
+      });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      document.body.appendChild(renderer.domElement);
+
+      // 创建一个组来包裹两个球体，方便统一旋转
+      const sphereGroup = new THREE.Group();
+      scene.add(sphereGroup);
+
+      // 辅助函数：生成球体粒子
+      function createParticleSphere(count, radius, color) {
+        const geometry = new THREE.BufferGeometry();
+        const positions = new Float32Array(count * 3);
+        const originalPositions = new Float32Array(count * 3);
+
+        for (let i = 0; i < count * 3; i += 3) {
+          // 使用球面均匀分布算法
+          const phi = Math.acos(1 - 2 * Math.random());
+          const theta = Math.random() * 2 * Math.PI;
+          const x = radius * Math.sin(phi) * Math.cos(theta);
+          const y = radius * Math.sin(phi) * Math.sin(theta);
+          const z = radius * Math.cos(phi);
+
+          positions[i] = x;
+          positions[i + 1] = y;
+          positions[i + 2] = z;
+          originalPositions[i] = x;
+          originalPositions[i + 1] = y;
+          originalPositions[i + 2] = z;
+        }
+
+        geometry.setAttribute(
+          "position",
+          new THREE.BufferAttribute(positions, 3),
+        );
+        geometry.setAttribute(
+          "originalPosition",
+          new THREE.BufferAttribute(originalPositions, 3),
+        );
+
+        const material = new THREE.PointsMaterial({
+          size: 0.03,
+          color: color,
+          transparent: true,
+          opacity: 0.8,
+          blending: THREE.AdditiveBlending,
+        });
+
+        return new THREE.Points(geometry, material);
+      }
+
+      // 创建内外层球体
+      const innerSphere = createParticleSphere(
+        CONFIG.innerCount,
+        CONFIG.innerRadius,
+        CONFIG.innerColor,
+      );
+      const outerSphere = createParticleSphere(
+        CONFIG.outerCount,
+        CONFIG.outerRadius,
+        CONFIG.outerColor,
+      );
+      sphereGroup.add(innerSphere);
+      sphereGroup.add(outerSphere);
+
+      // ================= 2. 交互状态与动画循环 =================
+      let targetRotationY = 0; // 绕Y轴旋转 (单指)
+      let targetRotationZ = 0; // 绕Z轴旋转 (双指)
+      let isFist = false; // 是否握拳状态
+      let innerTargetScale = 1.0;
+
+      function animate() {
+        requestAnimationFrame(animate);
+
+        // 1. 处理旋转插值 (平滑阻尼效果)
+        sphereGroup.rotation.y +=
+          (targetRotationY - sphereGroup.rotation.y) * 0.1;
+        sphereGroup.rotation.z +=
+          (targetRotationZ - sphereGroup.rotation.z) * 0.1;
+
+        // 基础自转，显得更有生命力
+        sphereGroup.rotation.y += 0.001;
+        sphereGroup.rotation.x += 0.0005;
+
+        // 2. 处理内层膨胀效果
+        innerTargetScale = isFist ? 1.5 : 1.0;
+        innerSphere.scale.lerp(
+          new THREE.Vector3(
+            innerTargetScale,
+            innerTargetScale,
+            innerTargetScale,
+          ),
+          0.1,
+        );
+
+        // 3. 处理外层爆炸效果
+        const outerPositions = outerSphere.geometry.attributes.position.array;
+        const outerOriginals =
+          outerSphere.geometry.attributes.originalPosition.array;
+
+        for (let i = 0; i < outerPositions.length; i += 3) {
+          // 目标位置：如果握拳则为原始位置的爆炸倍数，否则恢复原位
+          const targetX = isFist
+            ? outerOriginals[i] * (CONFIG.explodeMultiplier + Math.random())
+            : outerOriginals[i];
+          const targetY = isFist
+            ? outerOriginals[i + 1] * (CONFIG.explodeMultiplier + Math.random())
+            : outerOriginals[i + 1];
+          const targetZ = isFist
+            ? outerOriginals[i + 2] * (CONFIG.explodeMultiplier + Math.random())
+            : outerOriginals[i + 2];
+
+          // 爆炸速度快(0.15)，恢复速度慢(0.05)
+          const lerpFactor = isFist ? 0.15 : 0.05;
+          outerPositions[i] += (targetX - outerPositions[i]) * lerpFactor;
+          outerPositions[i + 1] +=
+            (targetY - outerPositions[i + 1]) * lerpFactor;
+          outerPositions[i + 2] +=
+            (targetZ - outerPositions[i + 2]) * lerpFactor;
+        }
+        outerSphere.geometry.attributes.position.needsUpdate = true;
+
+        renderer.render(scene, camera);
+      }
+      animate();
+
+      window.addEventListener("resize", () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+
+      // ================= 3. MediaPipe 视觉识别逻辑 =================
+      const videoElement = document.getElementById("videoElement");
+      let previousFingerX = null; // 用于计算滑动增量
+
+      function onResults(results) {
+        document.getElementById("loading").style.display = "none";
+
+        if (
+          results.multiHandLandmarks &&
+          results.multiHandLandmarks.length > 0
+        ) {
+          const landmarks = results.multiHandLandmarks[0];
+
+          // 判断手指是否伸直的简易逻辑 (指尖高于指关节)
+          const isIndexExtended = landmarks[8].y < landmarks[6].y;
+          const isMiddleExtended = landmarks[12].y < landmarks[10].y;
+          const isRingExtended = landmarks[16].y < landmarks[14].y;
+          const isPinkyExtended = landmarks[20].y < landmarks[18].y;
+
+          // 统计伸出的手指数量 (排除大拇指，因为大拇指判断较复杂，4指足以判断握拳/张开)
+          const extendedFingers = [
+            isIndexExtended,
+            isMiddleExtended,
+            isRingExtended,
+            isPinkyExtended,
+          ].filter(Boolean).length;
+
+          // 状态机判断
+          if (extendedFingers === 0) {
+            // 【握拳状态】
+            isFist = true;
+            previousFingerX = null; // 重置滑动追踪
+          } else if (extendedFingers >= 4) {
+            // 【手掌完全张开】
+            isFist = false;
+            previousFingerX = null;
+          } else if (extendedFingers === 1 && isIndexExtended) {
+            // 【单指(食指)滑动状态】
+            isFist = false;
+            const currentX = landmarks[8].x;
+            if (previousFingerX !== null) {
+              const deltaX = currentX - previousFingerX;
+              // 滑动控制Y轴旋转 (方向取反符合直觉)
+              targetRotationY -= deltaX * 10;
+            }
+            previousFingerX = currentX;
+          } else if (
+            extendedFingers === 2 &&
+            isIndexExtended &&
+            isMiddleExtended
+          ) {
+            // 【双指(食指+中指)滑动状态】
+            isFist = false;
+            // 取两根手指的中心点X坐标
+            const currentX = (landmarks[8].x + landmarks[12].x) / 2;
+            if (previousFingerX !== null) {
+              const deltaX = currentX - previousFingerX;
+              // 双指滑动控制Z轴顺/逆时针旋转
+              targetRotationZ -= deltaX * 10;
+            }
+            previousFingerX = currentX;
+          } else {
+            // 其他过渡手势，重置滑动基准点防止跳跃
+            previousFingerX = null;
+          }
+        } else {
+          // 没检测到手，重置基准点
+          previousFingerX = null;
+        }
+      }
+
+      const hands = new Hands({
+        locateFile: (file) =>
+          `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`,
+      });
+      hands.setOptions({
+        maxNumHands: 1,
+        modelComplexity: 1,
+        minDetectionConfidence: 0.6,
+        minTrackingConfidence: 0.6,
+      });
+      hands.onResults(onResults);
+
+      const cameraFeed = new Camera(videoElement, {
+        onFrame: async () => {
+          await hands.send({ image: videoElement });
+        },
+        width: 640,
+        height: 480,
+      });
+      cameraFeed.start();
+    </script>
+  </body>
+</html>
